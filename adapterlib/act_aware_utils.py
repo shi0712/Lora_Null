@@ -116,10 +116,20 @@ def calib_cov_distribution(model, calib_loader, use_cache=True, calib_dataset="w
 
     print(f"building covariance file: {cache_file}")
     print("new new new")
+
+    # 用于缓存输入样本以验证零空间属性
+    max_cached_samples = 100  # 缓存前100个token用于验证
+
     def hook(module, input, output):
         input = input[0].detach().squeeze(0).data   ## (2048, dim)
 
-        input = input
+        # 缓存输入样本（仅前max_cached_samples个）
+        if not hasattr(module, 'cached_input_samples'):
+            module.cached_input_samples = []
+        if len(module.cached_input_samples) < max_cached_samples:
+            # 归一化前保存原始输入（前几个token）
+            num_to_cache = min(max_cached_samples - len(module.cached_input_samples), input.size(0))
+            module.cached_input_samples.append(input[:num_to_cache].clone())
 
         input = input/torch.max(input).abs()
 
@@ -129,7 +139,7 @@ def calib_cov_distribution(model, calib_loader, use_cache=True, calib_dataset="w
         if torch.isinf(input).any():
             print("inf detected")
             raise Exception("inf in input, break")
-        
+
         covariance = input.t().matmul(input)
 
         if torch.isnan(covariance).any():
@@ -137,13 +147,14 @@ def calib_cov_distribution(model, calib_loader, use_cache=True, calib_dataset="w
             raise Exception("nan in covariance, break")
         if torch.isinf(covariance).any():
             print("inf detected")
-            raise Exception("inf in covariance, break")        
-        module.covariance_matrix += covariance/256 
+            raise Exception("inf in covariance, break")
+        module.covariance_matrix += covariance/256
         del covariance, input
 
     for name, module in model.named_modules():
         if isinstance(module, nn.Linear):
             module.covariance_matrix = 0
+            module.cached_input_samples = []
             module.register_forward_hook(hook)
     
     for batch in tqdm(calib_loader):
@@ -162,6 +173,14 @@ def calib_cov_distribution(model, calib_loader, use_cache=True, calib_dataset="w
                 raise Exception("inf in covariance")
             module.covariance_matrix = module.covariance_matrix     #/ 256
             all_covariance_matrix[name] = module.covariance_matrix
+
+            # 合并缓存的输入样本
+            if hasattr(module, 'cached_input_samples') and len(module.cached_input_samples) > 0:
+                module.cached_input_samples = torch.cat(module.cached_input_samples, dim=0)  # (num_samples, in_features)
+                print(f"Layer {name}: cached {module.cached_input_samples.shape[0]} input samples")
+            else:
+                module.cached_input_samples = None
+
     #torch.save(all_covariance_matrix, cache_file)  # this file would be large
     print("covariance matrices saved")
 

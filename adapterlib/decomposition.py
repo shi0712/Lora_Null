@@ -483,8 +483,51 @@ def decompose_to_adapter2(
         U.zero_()
         S.fill_(1.)
 
-                        
-                        
+        # ========== 验证零空间属性 ==========
+        # 保存用于验证的输入样本（如果有）
+        if hasattr(linear, 'cached_input_samples'):
+            X = linear.cached_input_samples.float()  # (num_samples, in_features)
+
+            # 计算 B @ X (B的权重是 V^T，即 U_min_K^T)
+            B_weight = V.t()  # (r, in_features)
+            BX = B_weight @ X.t()  # (r, num_samples)
+
+            # 计算 A @ B @ X (A初始化为0)
+            if sigma_fuse == 'UV':
+                A_weight = U.mul(S.sqrt())  # (out_features, r) - 应该是全0
+            elif sigma_fuse == 'U':
+                A_weight = U.mul(S)
+            elif sigma_fuse == 'V':
+                A_weight = U
+            ABX = A_weight @ BX  # (out_features, num_samples)
+
+            # 计算范数统计
+            BX_norm = torch.norm(BX, dim=0).mean().item()  # 每个样本的平均范数
+            ABX_norm = torch.norm(ABX, dim=0).mean().item()
+            X_norm = torch.norm(X, dim=1).mean().item()
+
+            # 计算特征值统计
+            min_eigenvalues = S_[-r:].cpu().numpy()
+            max_eigenvalues = S_[:r].cpu().numpy() if len(S_) >= r else S_.cpu().numpy()
+
+            print(f"\n{'='*60}")
+            print(f"[Null Space Verification] Layer: {linear.__class__.__name__}")
+            print(f"{'='*60}")
+            print(f"Input samples shape: {X.shape}")
+            print(f"Covariance eigenvalues (min {r}): {min_eigenvalues[:5]}..." if len(min_eigenvalues) > 5 else f"Covariance eigenvalues (min {r}): {min_eigenvalues}")
+            print(f"Covariance eigenvalues (max {r}): {max_eigenvalues[:5]}..." if len(max_eigenvalues) > 5 else f"Covariance eigenvalues (max {r}): {max_eigenvalues}")
+            print(f"Eigenvalue ratio (min/max): {min_eigenvalues.min() / max_eigenvalues.max():.2e}")
+            print(f"-" * 60)
+            print(f"||X|| (avg): {X_norm:.6f}")
+            print(f"||BX|| (avg): {BX_norm:.6f}")
+            print(f"||ABX|| (avg): {ABX_norm:.6f}")
+            print(f"||BX|| / ||X||: {BX_norm / X_norm:.6e} (应该 << 1)")
+            print(f"||ABX|| / ||X||: {ABX_norm / X_norm:.6e} (应该 ≈ 0)")
+            print(f"{'='*60}\n")
+
+            # 清理
+            del X, BX, ABX, A_weight, B_weight
+
             #V = U_min_K
             #S = torch.ones(r).to(V.dtype).to(V.device)
             #U = torch.zeros(weight_residual.shape[0],r).to(V.dtype).to(V.device)
@@ -758,6 +801,7 @@ def build_model2(model, args):
                     cov_aware=args.cov_aware,
                     singular_aware = args.singular_aware,
                     singular_aware_2 = args.singular_aware_2,
+                    sigma_fuse=args.sigma_fuse if hasattr(args, 'sigma_fuse') else 'UV',
                     r=args.r,
                     first_eigen = args.first_eigen,
 
